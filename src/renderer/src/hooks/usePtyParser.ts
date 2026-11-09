@@ -2,15 +2,17 @@ import { useCallback, useEffect, useRef } from 'react';
 import { useStore, type ToolKind, type StationKind } from '@/store/store';
 import { createAnsiStripper } from '@/components/ansiText';
 
-// Tool call lines look like: `● Read SPEC.md`, `● Bash npm test`, `● Edit src/foo.ts`
-const TOOL_RE = /●\s+([A-Za-z][A-Za-z_]*)(?:\s+(.+))?/g;
+// Tool call lines look like: `● Read SPEC.md`, `● Bash npm test`, `● Edit src/foo.ts` or Antigravity tool calls
+const TOOL_RE = /(?:●|Call|Tool|Executing)\s+([A-Za-z][A-Za-z0-9_]*)(?:\s+(.+))?/g;
 
 const TOOL_TO_STATION: Record<string, StationKind> = {
   Read: 'shelf', Edit: 'shelf', Write: 'shelf', MultiEdit: 'shelf',
   Grep: 'shelf', Glob: 'shelf',
   Bash: 'terminal', BashOutput: 'terminal',
   WebFetch: 'web', WebSearch: 'web',
-  TodoWrite: 'board', TaskCreate: 'board', TaskUpdate: 'board'
+  TodoWrite: 'board', TaskCreate: 'board', TaskUpdate: 'board',
+  read_file: 'shelf', write_file: 'shelf', edit_file: 'shelf',
+  run_command: 'terminal', search_web: 'web',
 };
 
 const TOOLKIND_BY_NAME: Record<string, ToolKind> = {
@@ -18,7 +20,9 @@ const TOOLKIND_BY_NAME: Record<string, ToolKind> = {
   Bash: 'Bash',
   WebFetch: 'WebFetch', WebSearch: 'WebSearch',
   Grep: 'Grep', Glob: 'Glob',
-  TodoWrite: 'TodoWrite'
+  TodoWrite: 'TodoWrite',
+  read_file: 'Read', write_file: 'Write', edit_file: 'Edit',
+  run_command: 'Bash', search_web: 'WebSearch'
 };
 
 // "Blocked" = Claude is genuinely waiting on the user. Match only real prompts
@@ -102,8 +106,10 @@ export function usePtyParser(agentId: string) {
       }
     }
 
-    // The "esc to interrupt" footer is only shown while a turn is in progress.
-    const running = /esc to interrupt/i.test(text);
+    // The "esc to interrupt" footer is only shown while a turn is in progress,
+    // or when Antigravity thinking/execution spinners are active.
+    const running = /esc to interrupt/i.test(text)
+      || /[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏]|Thinking\.\.\.|Executing|Running command/i.test(text);
 
     let lastTool: string | null = null;
     let lastArg: string | null = null;

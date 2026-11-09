@@ -436,6 +436,9 @@ export function OfficeFloor() {
       const agentById = (id: string): Agent | undefined =>
         useStore.getState().agents.find((a) => a.id === id);
 
+      /** Active 'doing' task IDs by assignee agent ID from tasks.json */
+      const activeTasksByAssignee = new Map<string, string>();
+
       // ─── The coffee economy: sideboard → machine → desk → sink → sideboard ─
       // A finite stock of mugs lives on a sideboard next to the kitchen counter.
       // Brewing requires a mug in hand (a clean one off the rack, or your own
@@ -517,7 +520,7 @@ export function OfficeFloor() {
           c.sitAtDesk(false);
         } else {
           c.hideThought();
-          c.startWandering();
+          c.sitAtDesk(false);
         }
       };
 
@@ -674,7 +677,7 @@ export function OfficeFloor() {
         if (!arrived) {
           // Never made it to the café (watchdog) — a held mug still goes home.
           if (c.isCarryingCup()) { rt.cupCarryHome = true; c.sitAtDesk(false); }
-          else c.startWandering();
+          else c.sitAtDesk(false);
           return;
         }
         if (c.isCarryingCup()) {
@@ -684,7 +687,7 @@ export function OfficeFloor() {
         } else if (!c.hasCupOnDesk() && Math.random() < 0.75) {
           startRunLeg(rt, 'toTray'); // fetch a clean mug, then brew
         } else {
-          c.startWandering();
+          c.sitAtDesk(false);
         }
       };
 
@@ -729,7 +732,8 @@ export function OfficeFloor() {
       const breakEligible = (agent: Agent, rt: Runtime): boolean => {
         if (agent.isGod || rt.brk || rt.err || rt.run || rt.cupCarryHome) return false;
         if (agent.status !== 'idle' && agent.status !== 'success') return false;
-        return !rt.character.isSitting();   // already parked at a desk → leave it
+        if (activeTasksByAssignee.has(agent.id)) return false; // working on a task
+        return true;
       };
 
       let cafeCooldown = 5;
@@ -873,7 +877,7 @@ export function OfficeFloor() {
           err.timer += dt;
           const spot = ERRAND_SPOTS[err.idx];
           if (err.phase === 'walking') {
-            if (err.timer > 20) { releaseErrand(rt); rt.character.startWandering(); }
+            if (err.timer > 20) { releaseErrand(rt); rt.character.sitAtDesk(false); }
             continue;
           }
           // doing: animate the spot; watering + smoking complete via their
@@ -882,7 +886,7 @@ export function OfficeFloor() {
           if (spot.kind !== 'water' && spot.kind !== 'smoke' && err.timer >= spot.duration) {
             releaseErrand(rt);
             rt.character.hideThought();
-            rt.character.startWandering();
+            rt.character.sitAtDesk(false);
           }
         }
         errCooldown -= dt;
@@ -929,7 +933,7 @@ export function OfficeFloor() {
             releaseErrand(rt!);
             c.hideThought();
             if (wasGod) c.sitAtDesk(true);  // the boss returns to his throne
-            else c.startWandering();
+            else c.sitAtDesk(false);
           };
           if (spot.kind === 'water') c.startWatering(spot.duration, finish);
           else if (spot.kind === 'smoke') c.startSmoking(spot.duration, finish);
@@ -1003,7 +1007,7 @@ export function OfficeFloor() {
             rt.character.setCupOnDesk(true);
             const agent = agentById(id);
             if (agent && !agent.isGod && (agent.status === 'idle' || agent.status === 'success')) {
-              rt.character.startWandering();
+              rt.character.sitAtDesk(false);
             }
           }
           // The monitor lights up whenever its owner is in the chair.
@@ -1318,6 +1322,29 @@ export function OfficeFloor() {
             status: String(t?.status ?? 'todo'),
             assignee: typeof t?.assignee === 'string' && t.assignee ? t.assignee : undefined
           }));
+          const prevDoing = new Set(activeTasksByAssignee.keys());
+          activeTasksByAssignee.clear();
+          for (const t of ledger) {
+            if (t.status === 'doing' && t.assignee) {
+              activeTasksByAssignee.set(t.assignee, t.id);
+            }
+          }
+          // Refresh state for assignees whose doing status changed
+          for (const [assigneeId] of activeTasksByAssignee) {
+            if (!prevDoing.has(assigneeId)) {
+              const agent = agentById(assigneeId);
+              const rt = runtimes.get(assigneeId);
+              if (agent && rt && !rt.brk && !rt.err) applyState(agent, rt, true);
+            }
+          }
+          for (const assigneeId of prevDoing) {
+            if (!activeTasksByAssignee.has(assigneeId)) {
+              const agent = agentById(assigneeId);
+              const rt = runtimes.get(assigneeId);
+              if (agent && rt && !rt.brk && !rt.err) applyState(agent, rt, true);
+            }
+          }
+
           // tasks waiting on the HUMAN feed the ASK ME board's note count
           const newAsk = arr.filter((t) =>
             String(t?.status) === 'blocked'
@@ -1447,8 +1474,11 @@ export function OfficeFloor() {
 
       // Map an agent's store state onto its on-floor character.
       const applyState = (agent: Agent, rt: Runtime, force = false) => {
+        const isTaskDoing = activeTasksByAssignee.has(agent.id);
+        const effectiveStatus = (agent.status === 'idle' && isTaskDoing) ? 'working' : agent.status;
+
         const changed = force
-          || rt.prevStatus !== agent.status
+          || rt.prevStatus !== effectiveStatus
           || rt.prevAction !== agent.action
           || rt.prevCarrying !== agent.carrying
           || rt.prevPrompt !== agent.lastPrompt;
@@ -1459,13 +1489,13 @@ export function OfficeFloor() {
         // nudge or heartbeat reply that flips busy for a few seconds ends
         // quietly instead of "celebrating" every few minutes over nothing.
         const wasBusy = rt.prevStatus === 'working' || rt.prevStatus === 'thinking' || rt.prevStatus === 'compacting';
-        const isBusy = agent.status === 'working' || agent.status === 'thinking' || agent.status === 'compacting';
+        const isBusy = effectiveStatus === 'working' || effectiveStatus === 'thinking' || effectiveStatus === 'compacting';
         if (isBusy && !wasBusy) rt.busySince = Date.now();
         const finishedWork = !force && !agent.isGod
-          && wasBusy && (agent.status === 'idle' || agent.status === 'success')
+          && wasBusy && (effectiveStatus === 'idle' || effectiveStatus === 'success')
           && rt.busySince !== undefined && Date.now() - rt.busySince >= CHEER_MIN_BUSY_MS;
         if (!isBusy) rt.busySince = undefined;
-        rt.prevStatus = agent.status;
+        rt.prevStatus = effectiveStatus;
         rt.prevAction = agent.action;
         rt.prevCarrying = agent.carrying;
         rt.prevPrompt = agent.lastPrompt;
@@ -1478,8 +1508,8 @@ export function OfficeFloor() {
         // other live status (work, blocked, …) cancels the break and falls
         // through to normal handling, sending it back to its desk / the door.
         if (rt.brk) {
-          if (agent.status === 'idle' || agent.status === 'success') {
-            c.setStatusGlyph(agent.status === 'success' ? 'success' : 'none');
+          if (effectiveStatus === 'idle' || effectiveStatus === 'success') {
+            c.setStatusGlyph(effectiveStatus === 'success' ? 'success' : 'none');
             return;
           }
           releaseBreak(rt);
@@ -1487,8 +1517,8 @@ export function OfficeFloor() {
         // Same for an idle errand (watering, window, fridge…): idle refreshes
         // leave it alone, real work cancels it and the agent heads to its desk.
         if (rt.err) {
-          if (agent.status === 'idle' || agent.status === 'success') {
-            c.setStatusGlyph(agent.status === 'success' ? 'success' : 'none');
+          if (effectiveStatus === 'idle' || effectiveStatus === 'success') {
+            c.setStatusGlyph(effectiveStatus === 'success' ? 'success' : 'none');
             return;
           }
           releaseErrand(rt);
@@ -1496,8 +1526,8 @@ export function OfficeFloor() {
         // And for a coffee run: real work cancels it mid-stride — a mug already
         // in hand simply rides along to the desk (cupCarryHome parks it there).
         if (rt.run) {
-          if (agent.status === 'idle' || agent.status === 'success') {
-            c.setStatusGlyph(agent.status === 'success' ? 'success' : 'none');
+          if (effectiveStatus === 'idle' || effectiveStatus === 'success') {
+            c.setStatusGlyph(effectiveStatus === 'success' ? 'success' : 'none');
             return;
           }
           releaseRun(rt);
@@ -1505,14 +1535,17 @@ export function OfficeFloor() {
 
         // A thought cloud above the head shows what the agent is doing RIGHT NOW
         // (its live `action`, e.g. "edit App.tsx"). Working → sit at the desk;
-        // blocked → walk to the door and flash "!"; done/idle → wander.
-        switch (agent.status) {
+        // blocked → walk to the door (if god) or wait at desk; idle → sit at desk.
+        switch (effectiveStatus) {
           case 'working':
-          case 'thinking':
+          case 'thinking': {
             c.setStatusGlyph('none');
             c.sitAtDesk(true);
-            c.showThought(liveActivity(agent), agent.carrying);
+            const activeTaskId = activeTasksByAssignee.get(agent.id);
+            const taskLabel = activeTaskId ? `Task ${activeTaskId}` : undefined;
+            c.showThought(liveActivity(agent, taskLabel), agent.carrying);
             break;
+          }
           case 'waiting':
             // Parked at the desk awaiting god / another agent — not actively
             // working (no focus glow) and NOT at the door (that's reserved for
@@ -1524,7 +1557,11 @@ export function OfficeFloor() {
           case 'blocked':
             c.setStatusGlyph('blocked');
             c.showThought(liveActivity(agent, t('office.activity.needsYou')));
-            c.walkToTile(rt.waitTile);
+            if (agent.isGod) {
+              c.walkToTile(rt.waitTile);
+            } else {
+              c.sitAtDesk(false);
+            }
             break;
           case 'compacting':
             // #5C — mid-/compact: stay put at the desk, "boxing up" glyph + thought,
@@ -1543,13 +1580,13 @@ export function OfficeFloor() {
           case 'success':
             c.setStatusGlyph('success');
             if (agent.isGod) { c.hideThought(); c.sitAtDesk(true); break; }
-            c.startWandering();
             if (finishedWork) {
               c.cheer();
               c.showThought(t(CHEER_KEYS[Math.floor(Math.random() * CHEER_KEYS.length)]));
             } else {
               c.hideThought();
             }
+            c.sitAtDesk(false);
             break;
           case 'ghost':
             c.setStatusGlyph('none');
@@ -1559,15 +1596,18 @@ export function OfficeFloor() {
           case 'idle':
           default:
             c.setStatusGlyph('none');
-            // The god runs the floor from its desk; everyone else wanders when idle.
-            if (agent.isGod) { c.sitAtDesk(true); c.showThought(liveActivity(agent, t('office.activity.runningFloor'))); }
-            else if (finishedWork) {
-              // Task done → a quick cheer on the spot, then back to roaming.
-              c.startWandering();
+            // Every agent sits at their assigned desk by default!
+            if (agent.isGod) {
+              c.sitAtDesk(true);
+              c.showThought(liveActivity(agent, t('office.activity.runningFloor')));
+            } else if (finishedWork) {
               c.cheer();
               c.showThought(t(CHEER_KEYS[Math.floor(Math.random() * CHEER_KEYS.length)]));
+              c.sitAtDesk(false);
+            } else {
+              c.sitAtDesk(false);
+              c.showThought(liveActivity(agent, t('office.activity.idle')));
             }
-            else { c.startWandering(); c.showThought(liveActivity(agent, t('office.activity.idle'))); }
             break;
         }
       };
