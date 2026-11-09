@@ -40,15 +40,15 @@ const REMOTE_CONTROL_SETTLE_MS = 1500;
 // flipped idle. A streaming turn (incl. a long tool) keeps emitting bytes → stays
 // working; only true silence drifts it idle. Hook events still win — a fresh
 // PreToolUse/Stop refreshes status on the next event. Checked on QUIESCE_POLL_MS.
-const QUIESCE_IDLE_MS = 12000;
-const QUIESCE_POLL_MS = 4000;
+const QUIESCE_IDLE_MS = 6000;
+const QUIESCE_POLL_MS = 1500;
 // After a god/agent spawn, hold off the inbox-wake + queue-drain typers for this
 // long while the readiness handshake + provider-specific boot sequence runs.
-const BOOT_GRACE_MS = 35_000;
+const BOOT_GRACE_MS = 4000;
 // Delay before typing a one-time TUI protocol seed into a fresh worker (3b) —
 // long enough for the TUI to finish painting and surface any permission prompt.
 // submitToPty additionally waits for the terminal's readiness handshake.
-const SEED_BOOT_MS = 12_000;
+const SEED_BOOT_MS = 1500;
 
 /** Hive-aware / hooks-bridge engines get standing goals via HookServer
  *  (SessionStart + UserPromptSubmit). Cursor and other no-hook engines need the
@@ -689,44 +689,47 @@ export function useHive(config: HarnessConfig | null): void {
   //    always worked this way.
   useEffect(() => {
     if (!config?.onboardingComplete) return;
-    const iv = setInterval(async () => {
+
+    const checkAgentInbox = async (agentId: string) => {
+      const a = useStore.getState().agents.find((x) => x.id === agentId && x.ptyId);
+      if (!a) return;
+      try {
+        const inbox = await window.cth.hiveInbox(a.id);
+        const seen = nudged.current[a.id] ?? (nudged.current[a.id] = new Set());
+        const fresh = inbox.filter((m) => m.id && !seen.has(m.id));
+        if (fresh.length) {
+          const summaries = fresh.map((m) => ({ id: m.id, from: m.from, subject: m.subject }));
+          useStore.getState().enqueueMessage(
+            a.id,
+            inboxNudgeText(fresh.map((m) => m.id), summaries),
+            { precondition: 'inbox-nonempty' }
+          );
+          for (const m of fresh) seen.add(m.id);
+        }
+      } catch { /* ignore */ }
+    };
+
+    // Instant event-driven wake: when router delivers a message, wake targets immediately
+    const offHiveMsg = window.cth.onHiveMessage
+      ? window.cth.onHiveMessage((e) => {
+          if (Array.isArray(e?.targets)) {
+            for (const t of e.targets) void checkAgentInbox(t);
+          }
+        })
+      : () => {};
+
+    // Periodic backstop poll (reduced to 1200ms)
+    const iv = setInterval(() => {
       const agents = useStore.getState().agents.filter((a) => a.ptyId);
       for (const a of agents) {
-        try {
-          const inbox = await window.cth.hiveInbox(a.id);
-          // Nudge on any id we have not nudged for yet (#130's per-id Set).
-          // Draining shrinks the set and introduces nothing new, so this POLL
-          // stays quiet; a genuinely new message fires regardless of how its id
-          // happens to sort.
-          //
-          // That reasoning covers the poll only — it does NOT survive the gap
-          // between enqueue and delivery, which is why the nudge carries an
-          // 'inbox-nonempty' precondition that the drain re-checks before typing.
-          // Without it: mail lands and queues a nudge, the already-awake agent
-          // drains the whole inbox in that same turn, and the nudge is typed into
-          // an empty inbox afterwards — a wasted turn, and the most expensive one
-          // on the floor when the agent is god.
-          const seen = nudged.current[a.id] ?? (nudged.current[a.id] = new Set());
-          const fresh = inbox.filter((m) => m.id && !seen.has(m.id));
-          if (fresh.length) {
-            // Name the ids: the nudge is queued now and typed whenever the agent
-            // next goes idle, so it can arrive long after the agent drained and
-            // filed this very mail. Carrying the ids is what lets it tell
-            // "already handled" from "woken for nothing". The queue keeps only
-            // one nudge pending per agent (see enqueueMessage), so a suppressed
-            // copy's ids stay unnamed — hence the text points at the pending
-            // inbox as the authority rather than at the list.
-            useStore.getState().enqueueMessage(
-              a.id,
-              inboxNudgeText(fresh.map((m) => m.id)),
-              { precondition: 'inbox-nonempty' }
-            );
-            for (const m of fresh) seen.add(m.id);
-          }
-        } catch { /* ignore */ }
+        void checkAgentInbox(a.id);
       }
-    }, 4000);
-    return () => clearInterval(iv);
+    }, 1200);
+
+    return () => {
+      clearInterval(iv);
+      offHiveMsg();
+    };
   }, [config?.onboardingComplete]);
 
   // 3b) Seed a fresh "type-into-tui" worker (Crush) with the hive protocol. Its
@@ -781,7 +784,7 @@ export function useHive(config: HarnessConfig | null): void {
   //    park in the store and get typed in (and submitted) as soon as it's free.
   useEffect(() => {
     if (!config?.onboardingComplete) return;
-    const FLUSH_COOLDOWN_MS = 4500;
+    const FLUSH_COOLDOWN_MS = 800;
     // A message that fails this many PTY writes (dead/crashed pty that the store
     // still thinks is idle) is dropped WITH a console.warn — bounded so the drain
     // never spins forever on a corpse, loud so the loss is diagnosable. (#113)
@@ -949,7 +952,7 @@ export function useHive(config: HarnessConfig | null): void {
       debounce = setTimeout(() => { debounce = null; flush(); }, 200);
     };
     const unsub = useStore.subscribe(schedule);
-    const iv = setInterval(flush, 3000);
+    const iv = setInterval(flush, 1000);
     schedule();
     return () => { unsub(); if (debounce) clearTimeout(debounce); clearInterval(iv); };
   }, [config?.onboardingComplete]);

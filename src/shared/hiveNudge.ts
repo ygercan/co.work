@@ -22,8 +22,17 @@ const NUDGE_HEAD = 'You have new hive inbox message(s)';
  * has a nudge suppressed by the one-pending rule below still finds its mail by
  * reading the directory, so the text must never invite it to stop at the ids.
  */
-export function inboxNudgeText(ids: string[]): string {
-  const named = ids.length ? ` — at least: ${ids.join(', ')}` : '';
+export function inboxNudgeText(
+  ids: string[],
+  summaries?: Array<{ id: string; from?: string; subject?: string }>
+): string {
+  let named = ids.length ? ` — at least: ${ids.join(', ')}` : '';
+  if (summaries && summaries.length > 0) {
+    const details = summaries
+      .map((s) => `[${s.id}] from ${s.from ?? 'unknown'}: "${s.subject ?? '(no subject)'}"`)
+      .join('; ');
+    named = ` — ${details}`;
+  }
   return `${NUDGE_HEAD}${named}. Read your inbox, act on what is pending there, and move handled ones to inbox/.done/. Your inbox directory is authoritative: work everything still pending in it, and if a named id is already in inbox/.done/ you handled it on an earlier turn and can ignore that one. Act autonomously; only message god if you genuinely need a decision.`;
 }
 

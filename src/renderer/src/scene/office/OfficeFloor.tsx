@@ -1401,7 +1401,7 @@ export function OfficeFloor() {
         } catch { /* keep the last drawing */ }
       };
       void pollTaskBoard();
-      const taskBoardPoll = setInterval(() => { void pollTaskBoard(); }, 5000);
+      const taskBoardPoll = setInterval(() => { void pollTaskBoard(); }, 1200);
       (app as any).__taskBoardPoll = taskBoardPoll;
 
       const addCharacter = async (agent: Agent) => {
@@ -1671,6 +1671,7 @@ export function OfficeFloor() {
       // this method) degrades to "no envelopes" rather than crashing the floor.
       const offMessage = window.cth.onHiveMessage
         ? window.cth.onHiveMessage((e) => {
+            void pollTaskBoard();
             for (const target of e.targets) spawnHandoff(e.from, target, e.act, e.needsHuman);
           })
         : () => { /* onHiveMessage unavailable — real handoffs disabled this session */ };

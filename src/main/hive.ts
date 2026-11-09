@@ -1837,8 +1837,9 @@ export class HiveManager {
 
   // — router: drain outboxes → inboxes —
 
-  /** Poll-based router. Cheap and robust vs fs.watch quirks on macOS. */
-  startRouter(intervalMs = 1500): void {
+  /** Poll-based router. Cheap and robust vs fs.watch quirks on macOS.
+   *  Fast 300ms cadence for snappy sub-second inter-agent task handoffs. */
+  startRouter(intervalMs = 300): void {
     if (this.routerTimer || !this.enabled()) return;
     this.routerTimer = setInterval(() => {
       try { this.routeOnce(); } catch { /* keep the loop alive */ }
