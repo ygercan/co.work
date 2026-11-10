@@ -236,6 +236,21 @@ export function OfficeFloor() {
 
     const runtimes = new Map<string, Runtime>();
     const seatClaims = new Set<number>();
+    const agentSeatMap = new Map<string, number>();
+    const inFlightAdds = new Set<string>();
+
+    const ROLE_DESK_MAP: Record<string, string> = {
+      god: 'desk-ceo',
+      architect: 'desk-chief-architect',
+      'backend-dev': 'desk-backend-engineer',
+      'ui-designer': 'desk-ui-ux-expert',
+      'data-engineer': 'desk-data-engineer',
+      'frontend-dev': 'pc-1',
+      'perf-seo': 'pc-2',
+      'code-reviewer': 'pc-3',
+      'qa-automation': 'pc-4',
+      appsec: 'pc-5'
+    };
     // In-flight message envelopes (sender desk → recipient desk). Capped so a
     // broadcast doesn't bury the floor in paper.
     const envelopes: MessageEnvelope[] = [];
@@ -376,14 +391,43 @@ export function OfficeFloor() {
       if (waitTiles.length === 0) waitTiles.push(entrance);
 
       // Seat 0 is desk-ceo — "Michael's room" — reserved for the god agent.
-      // All other workers claim seats from 1 onward.
+      // All other workers claim dedicated desks matching their roles, then open bullpen PCs.
       const GOD_SEAT = 0;
-      const claimSeat = (agent: Agent): number | null => {
-        if (agent.isGod) { seatClaims.add(GOD_SEAT); return GOD_SEAT; }
-        for (let i = 1; i < seatTiles.length; i++) {
-          if (!seatClaims.has(i)) { seatClaims.add(i); return i; }
+      const claimSeat = (agent: Agent): number => {
+        if (agentSeatMap.has(agent.id)) {
+          return agentSeatMap.get(agent.id)!;
         }
-        return null;
+        if (agent.isGod) {
+          agentSeatMap.set(agent.id, GOD_SEAT);
+          seatClaims.add(GOD_SEAT);
+          return GOD_SEAT;
+        }
+
+        // 1. Try to find a role-matching desk in primarySeatNames if available
+        const preferredName = ROLE_DESK_MAP[agent.id];
+        if (preferredName) {
+          const prefIdx = theme.primarySeatNames.indexOf(preferredName);
+          if (prefIdx > 0 && prefIdx < seatTiles.length && !seatClaims.has(prefIdx)) {
+            agentSeatMap.set(agent.id, prefIdx);
+            seatClaims.add(prefIdx);
+            return prefIdx;
+          }
+        }
+
+        // 2. Otherwise find the first available seat from 1 onward
+        for (let i = 1; i < seatTiles.length; i++) {
+          if (!seatClaims.has(i)) {
+            agentSeatMap.set(agent.id, i);
+            seatClaims.add(i);
+            return i;
+          }
+        }
+
+        // 3. Fallback: cycle through worker seats (never return null or default to entrance!)
+        const fallbackIdx = 1 + (agentSeatMap.size % Math.max(1, seatTiles.length - 1));
+        agentSeatMap.set(agent.id, fallbackIdx);
+        seatClaims.add(fallbackIdx);
+        return fallbackIdx;
       };
 
       // Face a seated agent toward their desk (the adjacent non-walkable
@@ -1405,18 +1449,24 @@ export function OfficeFloor() {
       (app as any).__taskBoardPoll = taskBoardPoll;
 
       const addCharacter = async (agent: Agent) => {
+        if (runtimes.has(agent.id)) return;
         const charName = theme.cast.byName[agent.character] ? agent.character : theme.cast.defaultCharacter;
         const member = theme.cast.byName[charName];
         const seatIndex = claimSeat(agent);
-        const seatTile: Tile = (seatIndex != null ? seatTiles[seatIndex] : undefined)
+        const seatTile: Tile = seatTiles[seatIndex]
           ?? mapRenderer.getSpawnPoint('entrance')
           ?? { x: 2, y: 2 };
         const waitTile = waitTiles[(seatIndex ?? 0) % waitTiles.length];
         const frames = await theme.cast.getFrames(charName);
         // Bail if the agent was removed (or scene torn down) while loading.
         if (mountIdRef.current !== mountId) return;
+        if (runtimes.has(agent.id)) return;
         if (!useStore.getState().agents.some((a) => a.id === agent.id)) {
-          if (seatIndex != null) seatClaims.delete(seatIndex);
+          const seatIdx = agentSeatMap.get(agent.id);
+          if (seatIdx != null) {
+            seatClaims.delete(seatIdx);
+            agentSeatMap.delete(agent.id);
+          }
           return;
         }
         const character = new Character({
@@ -1426,7 +1476,7 @@ export function OfficeFloor() {
           frames,
           seatTile,
           seatDirection: facingForSeat(seatTile),
-          spawnTile: entrance, // walk in from the office door
+          spawnTile: seatTile, // Spawn directly at assigned desk!
           glowColor: hexNum(colors.accent[agent.accent]) ?? hexToNumber(member.shirt),
           onClick: (id) => useStore.getState().select(id),
         });
@@ -1464,7 +1514,11 @@ export function OfficeFloor() {
           cleanCups = Math.min(MAX_CUPS, cleanCups + 1);
           drawTray();
         }
-        if (rt.seatIndex != null) seatClaims.delete(rt.seatIndex);
+        const seatIdx = agentSeatMap.get(id);
+        if (seatIdx != null) {
+          seatClaims.delete(seatIdx);
+          agentSeatMap.delete(id);
+        }
         rt.screen?.destroy();
         rt.character.hide(0);
         // give the fade-out a moment, then destroy
@@ -1620,8 +1674,14 @@ export function OfficeFloor() {
         }
         for (const agent of agents) {
           const rt = runtimes.get(agent.id);
-          if (!rt) void addCharacter(agent);
-          else {
+          if (!rt) {
+            if (!inFlightAdds.has(agent.id)) {
+              inFlightAdds.add(agent.id);
+              void addCharacter(agent).finally(() => {
+                inFlightAdds.delete(agent.id);
+              });
+            }
+          } else {
             rt.character.setName(agent.name);
             applyState(agent, rt);
           }
